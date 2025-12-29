@@ -1,0 +1,32 @@
+[package]
+name = "monitor-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+] }
+sysinfo = "0.32"
+tray-icon = "0.18"
+image = "0.25"
+native-windows-gui = { version = "1.0", features = ["all"] }
+native-windows-derive = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Enable Link Time Optimization
+codegen-units = 1   # Better optimization
+strip = true        # Strip symbols
+panic = "abort"     # Smaller binary
+
+[build-dependencies]
+embed-resource = "2.4"
