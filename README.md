@@ -1,8 +1,13 @@
 # Monitor Manager
 
+![Python Build](https://github.com/Demoen/lolscript/actions/workflows/python-build.yml/badge.svg)
+![Rust Build](https://github.com/Demoen/lolscript/actions/workflows/rust-build.yml/badge.svg)
+
 A Windows system tray application that monitors a specific .exe file and automatically disables all monitors except the primary one when the application runs, then re-enables them when it closes. Available in both Python and Rust implementations.
 
-![Monitor Manager](icon.png)
+<p align="center">
+  <img src="icon.png" alt="Monitor Manager" width="200">
+</p>
 
 ## Features
 
