@@ -68,10 +68,13 @@ jobs:
         name: monitor-manager-rust-windows
         path: ./dist
     
+    - name: Rename executable
+      run: Rename-Item -Path ./dist/monitor-manager.exe -NewName monitor-manager-rust.exe
+    
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        files: ./dist/monitor-manager.exe
+        files: ./dist/monitor-manager-rust.exe
         draft: false
         prerelease: false
       env:

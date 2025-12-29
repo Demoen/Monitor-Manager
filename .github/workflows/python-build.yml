@@ -56,10 +56,13 @@ jobs:
         name: monitor-manager-python-windows
         path: ./dist
     
+    - name: Rename executable
+      run: Rename-Item -Path ./dist/MonitorManager.exe -NewName monitor-manager-python.exe
+    
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        files: ./dist/MonitorManager.exe
+        files: ./dist/monitor-manager-python.exe
         draft: false
         prerelease: false
       env:
