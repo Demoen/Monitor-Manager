@@ -23,6 +23,9 @@ MANIFEST
 *.manifest
 *.spec
 
+# Allow the Rust app's embedded Windows manifest to be committed
+!monitor-manager-rust/app.manifest
+
 # Virtual environments
 venv/
 env/
