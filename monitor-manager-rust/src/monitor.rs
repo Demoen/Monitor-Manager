@@ -134,12 +134,31 @@ impl MonitorManager {
 
     pub fn restore_all_monitors(&self) -> Vec<String> {
         let mut restored = Vec::new();
-        // Iterate over saved settings keys (device names) instead of current monitors
-        // This ensures we try to restore monitors even if they are currently detached/hidden
-        for (device_name, _) in &self.saved_settings {
-            if self.restore_monitor(device_name) {
-                restored.push(device_name.clone());
+        // Apply as a batch: stage per-monitor changes with NORESET, then apply once.
+        // This significantly improves reliability when multiple displays are being re-attached.
+        let stage_flags = CDS_TYPE(CDS_UPDATEREGISTRY.0 | CDS_NORESET.0);
+
+        for (device_name, settings) in &self.saved_settings {
+            let device_name_wide: Vec<u16> = device_name.encode_utf16().chain(Some(0)).collect();
+
+            unsafe {
+                let result = ChangeDisplaySettingsExW(
+                    PCWSTR(device_name_wide.as_ptr()),
+                    Some(settings),
+                    None,
+                    stage_flags,
+                    None,
+                );
+
+                if result == DISP_CHANGE_SUCCESSFUL {
+                    restored.push(device_name.clone());
+                }
             }
+        }
+
+        // Apply all staged changes
+        unsafe {
+            let _ = ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None);
         }
         restored
     }

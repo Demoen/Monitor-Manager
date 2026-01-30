@@ -88,6 +88,16 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                     // Refresh menu after manual restore
                     refresh_monitors_submenu(&monitors_submenu, &state);
                 } else if event.id == quit_id {
+                    // Best-effort safety: re-enable monitors before exiting.
+                    // The monitoring loop is abruptly terminated by process exit.
+                    let monitor_manager = {
+                        let state = state.lock().unwrap();
+                        state.monitor_manager.clone()
+                    };
+                    {
+                        let manager = monitor_manager.lock().unwrap();
+                        let _ = manager.restore_all_monitors();
+                    }
                     drop(tray_icon);
                     std::process::exit(0);
                 }

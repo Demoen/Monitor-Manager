@@ -121,26 +121,40 @@ fn monitor_loop(state: Arc<Mutex<AppState>>) {
                 state.status = "Process detected! Disabling secondary monitors...".to_string();
             }
 
-            // Get secondary monitors and disable them
-            let monitor_manager = {
-                let state = state.lock().unwrap();
-                state.monitor_manager.clone()
-            };
-            let manager = monitor_manager.lock().unwrap();
-            
-            let monitors = manager.get_all_monitors();
-            for monitor in monitors {
-                if !monitor.is_primary && monitor.is_active {
-                    if manager.disable_monitor(&monitor.device_name) {
-                        let mut state = state.lock().unwrap();
-                        state.status = format!("✓ Disabled {}", monitor.description);
+            // IMPORTANT: never lock `state` while holding the monitor manager lock.
+            // The tray UI also locks these in the opposite order; doing both can deadlock.
+            let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
+
+            // Refresh saved settings right before making changes, so restoring returns
+            // monitors to the *current* configuration (not stale startup settings).
+            let disabled_count = {
+                let mut manager = monitor_manager.lock().unwrap();
+                manager.save_current_settings();
+
+                let to_disable = manager
+                    .get_all_monitors()
+                    .into_iter()
+                    .filter(|m| !m.is_primary && m.is_active)
+                    .map(|m| m.device_name)
+                    .collect::<Vec<_>>();
+
+                let mut count = 0usize;
+                for device_name in &to_disable {
+                    if manager.disable_monitor(device_name) {
+                        count += 1;
                     }
                 }
-            }
+
+                count
+            };
 
             {
                 let mut state = state.lock().unwrap();
-                state.status = "Monitoring active - secondary monitors disabled".to_string();
+                if disabled_count > 0 {
+                    state.status = format!("Monitoring active - disabled {} monitor(s)", disabled_count);
+                } else {
+                    state.status = "Monitoring active - no secondary monitors to disable".to_string();
+                }
                 state.monitoring = true;
             }
 
@@ -153,22 +167,21 @@ fn monitor_loop(state: Arc<Mutex<AppState>>) {
                 state.status = "Process closed. Re-enabling monitors...".to_string();
             }
 
-            // Restore all secondary monitors
-            let monitor_manager = {
-                let state = state.lock().unwrap();
-                state.monitor_manager.clone()
+            // Restore all monitors that we have saved settings for.
+            // This is done in a single batch to avoid partial restore failures.
+            let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
+            let restored_count = {
+                let manager = monitor_manager.lock().unwrap();
+                manager.restore_all_monitors().len()
             };
-            let manager = monitor_manager.lock().unwrap();
-            
-            let restored = manager.restore_all_monitors();
-            for _ in restored {
-                let mut state = state.lock().unwrap();
-                state.status = format!("✓ Restored monitor");
-            }
 
             {
                 let mut state = state.lock().unwrap();
-                state.status = "Idle - waiting for process".to_string();
+                if restored_count > 0 {
+                    state.status = format!("Idle - restored {} monitor(s)", restored_count);
+                } else {
+                    state.status = "Idle - no monitors needed restoration".to_string();
+                }
                 state.monitoring = false;
             }
 
