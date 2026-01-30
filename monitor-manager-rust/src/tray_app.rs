@@ -9,7 +9,8 @@ use native_windows_derive::NwgUi;
 use std::cell::RefCell;
 use crate::AppState;
 use std::path::Path;
-use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, TranslateMessage, DispatchMessageW, MSG};
+use std::sync::atomic::Ordering;
+use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, PostQuitMessage, TranslateMessage, MSG};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 
@@ -37,7 +38,8 @@ pub fn run(state: Arc<Mutex<AppState>>) {
     let icon = load_icon_from_file("icon.ico");
 
     // Build tray icon
-    let tray_icon = TrayIconBuilder::new()
+    let mut tray_icon = Some(
+        TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         // Important UX: left-click should NOT open the context menu.
         // We use left-click to open the settings window directly.
@@ -45,7 +47,8 @@ pub fn run(state: Arc<Mutex<AppState>>) {
         .with_tooltip("Monitor Manager\nStatus: Idle")
         .with_icon(icon)
         .build()
-        .unwrap();
+        .unwrap(),
+    );
 
     // Menu event handler
     let menu_channel = MenuEvent::receiver();
@@ -88,6 +91,13 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                     // Refresh menu after manual restore
                     refresh_monitors_submenu(&monitors_submenu, &state);
                 } else if event.id == quit_id {
+                    // Signal background monitoring thread to stop, so the process can exit cleanly.
+                    let shutdown = {
+                        let state = state.lock().unwrap();
+                        state.shutdown.clone()
+                    };
+                    shutdown.store(true, Ordering::Relaxed);
+
                     // Best-effort safety: re-enable monitors before exiting.
                     // The monitoring loop is abruptly terminated by process exit.
                     let monitor_manager = {
@@ -98,8 +108,10 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                         let manager = monitor_manager.lock().unwrap();
                         let _ = manager.restore_all_monitors();
                     }
-                    drop(tray_icon);
-                    std::process::exit(0);
+                    tray_icon.take();
+
+                    // End the Win32 message loop
+                    PostQuitMessage(0);
                 }
             }
 

@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::path::PathBuf;
@@ -57,6 +58,7 @@ pub struct AppState {
     pub monitoring: bool,
     pub status: String,
     pub monitor_manager: Arc<Mutex<MonitorManager>>,
+    pub shutdown: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -66,6 +68,7 @@ impl AppState {
             monitoring: false,
             status: "Idle - waiting for process".to_string(),
             monitor_manager: Arc::new(Mutex::new(monitor_manager)),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -96,6 +99,14 @@ fn monitor_loop(state: Arc<Mutex<AppState>>) {
     let mut was_running = false;
 
     loop {
+        // Allow a clean shutdown (used by tray 'Exit')
+        if state.lock().unwrap().shutdown.load(Ordering::Relaxed) {
+            // Best effort: if we were monitoring, try to restore before exiting
+            let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
+            let _ = monitor_manager.lock().unwrap().restore_all_monitors();
+            break;
+        }
+
         // Refresh process list
         system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
