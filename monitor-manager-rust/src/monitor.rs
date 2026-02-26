@@ -134,8 +134,7 @@ impl MonitorManager {
 
     pub fn restore_all_monitors(&self) -> Vec<String> {
         let mut restored = Vec::new();
-        // Apply as a batch: stage per-monitor changes with NORESET, then apply once.
-        // This significantly improves reliability when multiple displays are being re-attached.
+        // Stage per-monitor changes with NORESET, then flush once — more reliable for multi-monitor restore.
         let stage_flags = CDS_TYPE(CDS_UPDATEREGISTRY.0 | CDS_NORESET.0);
 
         for (device_name, settings) in &self.saved_settings {
@@ -156,7 +155,6 @@ impl MonitorManager {
             }
         }
 
-        // Apply all staged changes
         unsafe {
             let _ = ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None);
         }

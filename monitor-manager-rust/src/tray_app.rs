@@ -17,7 +17,6 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 pub fn run(state: Arc<Mutex<AppState>>) {
     nwg::init().expect("Failed to init Native Windows GUI");
     
-    // Create tray menu
     let tray_menu = Menu::new();
     let settings_item = MenuItem::new("⚙️ Settings", true, None);
     let restore_item = MenuItem::new("🔄 Re-enable Monitors", true, None);
@@ -31,42 +30,33 @@ pub fn run(state: Arc<Mutex<AppState>>) {
     tray_menu.append(&status_item).unwrap();
     tray_menu.append(&quit_item).unwrap();
 
-    // Initial population
     refresh_monitors_submenu(&monitors_submenu, &state);
 
-    // Load icon from file
     let icon = load_icon_from_file("icon.ico");
 
-    // Build tray icon
     let mut tray_icon = Some(
         TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
-        // Important UX: left-click should NOT open the context menu.
-        // We use left-click to open the settings window directly.
-        .with_menu_on_left_click(false)
+        .with_menu_on_left_click(false) // left-click opens settings, not the context menu
         .with_tooltip("Monitor Manager\nStatus: Idle")
         .with_icon(icon)
         .build()
         .unwrap(),
     );
 
-    // Menu event handler
     let menu_channel = MenuEvent::receiver();
     let tray_channel = TrayIconEvent::receiver();
 
-    // Store menu item IDs for comparison
     let settings_id = settings_item.id().clone();
     let restore_id = restore_item.id().clone();
     let quit_id = quit_item.id().clone();
 
-    // Windows message loop for processing tray icon events
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
 
-            // Drain menu events
             while let Ok(event) = menu_channel.try_recv() {
                 if event.id == settings_id {
                     show_settings_dialog(&state);
@@ -88,18 +78,14 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                         nwg::simple_message("Info", "No monitors needed restoration.");
                     }
 
-                    // Refresh menu after manual restore
                     refresh_monitors_submenu(&monitors_submenu, &state);
                 } else if event.id == quit_id {
-                    // Signal background monitoring thread to stop, so the process can exit cleanly.
                     let shutdown = {
                         let state = state.lock().unwrap();
                         state.shutdown.clone()
                     };
                     shutdown.store(true, Ordering::Relaxed);
 
-                    // Best-effort safety: re-enable monitors before exiting.
-                    // The monitoring loop is abruptly terminated by process exit.
                     let monitor_manager = {
                         let state = state.lock().unwrap();
                         state.monitor_manager.clone()
@@ -109,13 +95,10 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                         let _ = manager.restore_all_monitors();
                     }
                     tray_icon.take();
-
-                    // End the Win32 message loop
                     PostQuitMessage(0);
                 }
             }
 
-            // Drain tray events
             while let Ok(event) = tray_channel.try_recv() {
                 match event {
                     TrayIconEvent::Click {
@@ -130,10 +113,8 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                         button_state: MouseButtonState::Down,
                         ..
                     } => {
-                        // Right-click opens the context menu: refresh dynamic items right before.
                         refresh_monitors_submenu(&monitors_submenu, &state);
 
-                        // Update status line to current app status
                         let current_status = {
                             let state = state.lock().unwrap();
                             state.status.clone()
@@ -148,7 +129,6 @@ pub fn run(state: Arc<Mutex<AppState>>) {
 }
 
 fn refresh_monitors_submenu(monitors_submenu: &Submenu, state: &Arc<Mutex<AppState>>) {
-    // Clear all submenu items
     while monitors_submenu.remove_at(0).is_some() {}
 
     let monitors = {
@@ -195,7 +175,6 @@ fn refresh_monitors_submenu(monitors_submenu: &Submenu, state: &Arc<Mutex<AppSta
 
 fn load_icon_from_file(path: &str) -> TrayIconImage {
     if Path::new(path).exists() {
-        // Try to load from file
         if let Ok(img) = image::open(path) {
             let rgba = img.to_rgba8();
             let (width, height) = rgba.dimensions();
@@ -206,15 +185,13 @@ fn load_icon_from_file(path: &str) -> TrayIconImage {
             }
         }
     }
-    
-    // Fallback: create default blue circle icon
+
     create_default_icon()
 }
 
 fn create_default_icon() -> TrayIconImage {
     let mut rgba = vec![0u8; 64 * 64 * 4];
-    
-    // Draw a blue circle
+
     for y in 0..64 {
         for x in 0..64 {
             let dx = x as f32 - 32.0;
@@ -333,7 +310,7 @@ impl SettingsDialog {
 }
 
 fn show_settings_dialog(state: &Arc<Mutex<AppState>>) {
-    // Initialize COM on this thread for FileDialog
+    // COM must be initialized on this thread for FileDialog to work.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }

@@ -1,9 +1,8 @@
 # Monitor Manager
 
-![Python Build](https://github.com/Demoen/lolscript/actions/workflows/python-build.yml/badge.svg)
 ![Rust Build](https://github.com/Demoen/lolscript/actions/workflows/rust-build.yml/badge.svg)
 
-A Windows system tray application that monitors a specific .exe file and automatically disables all monitors except the primary one when the application runs, then re-enables them when it closes. Available in both Python and Rust implementations.
+A Windows system tray application that monitors a specific .exe file and automatically disables all secondary monitors when the application runs, then re-enables them when it closes.
 
 <p align="center">
   <img src="icon.png" alt="Monitor Manager" width="200">
@@ -16,22 +15,8 @@ A Windows system tray application that monitors a specific .exe file and automat
 - Lightweight and efficient
 - Windows native integration
 
-## Versions
+## Build
 
-### Python Version (`monitor-manager/`)
-Built with Python and PyInstaller for a quick, portable executable.
-
-**Build:**
-```bash
-cd monitor-manager
-pip install -r requirements.txt
-build_exe.bat
-```
-
-### Rust Version (`monitor-manager-rust/`)
-Built with Rust for maximum performance and minimal resource usage.
-
-**Build:**
 ```bash
 cd monitor-manager-rust
 cargo build --release
@@ -43,11 +28,7 @@ Download the latest release from the [Releases](../../releases) page or build fr
 
 ## CI/CD
 
-Both versions are automatically built and tested using GitHub Actions:
-- **Python Build**: Creates Windows executable via PyInstaller
-- **Rust Build**: Compiles and tests with Cargo
-
-Releases are automatically created when pushing version tags (e.g., `v1.0.0`).
+Automatically built and released using GitHub Actions. Releases are created when pushing version tags (e.g., `v1.0.0`).
 
 ## License
 

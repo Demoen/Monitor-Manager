@@ -74,23 +74,18 @@ impl AppState {
 }
 
 fn main() {
-    // Initialize monitor manager and save initial settings
     let mut monitor_manager = MonitorManager::new();
     monitor_manager.save_current_settings();
 
-    // Create shared app state
     let app_state = Arc::new(Mutex::new(AppState::new(monitor_manager)));
 
-    // Start monitoring thread
     let state_clone = Arc::clone(&app_state);
     let monitor_thread = thread::spawn(move || {
         monitor_loop(state_clone);
     });
 
-    // Run system tray application
     tray_app::run(app_state);
 
-    // Wait for monitor thread to finish
     monitor_thread.join().unwrap();
 }
 
@@ -99,24 +94,19 @@ fn monitor_loop(state: Arc<Mutex<AppState>>) {
     let mut was_running = false;
 
     loop {
-        // Allow a clean shutdown (used by tray 'Exit')
         if state.lock().unwrap().shutdown.load(Ordering::Relaxed) {
-            // Best effort: if we were monitoring, try to restore before exiting
             let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
             let _ = monitor_manager.lock().unwrap().restore_all_monitors();
             break;
         }
 
-        // Refresh process list
         system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-        // Get current target exe from config
         let target_exe = {
             let state = state.lock().unwrap();
             state.config.target_exe.clone()
         };
 
-        // Check if target process is running
         let is_running = system.processes().values().any(|process| {
             if let Some(exe_path) = process.exe() {
                 exe_path.to_string_lossy().to_lowercase() == target_exe.to_lowercase()
@@ -125,19 +115,15 @@ fn monitor_loop(state: Arc<Mutex<AppState>>) {
             }
         });
 
-        // Process just started
         if is_running && !was_running {
             {
                 let mut state = state.lock().unwrap();
                 state.status = "Process detected! Disabling secondary monitors...".to_string();
             }
 
-            // IMPORTANT: never lock `state` while holding the monitor manager lock.
-            // The tray UI also locks these in the opposite order; doing both can deadlock.
+            // Never lock `state` while holding the monitor_manager lock — deadlock risk.
             let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
 
-            // Refresh saved settings right before making changes, so restoring returns
-            // monitors to the *current* configuration (not stale startup settings).
             let disabled_count = {
                 let mut manager = monitor_manager.lock().unwrap();
                 manager.save_current_settings();
@@ -170,16 +156,12 @@ fn monitor_loop(state: Arc<Mutex<AppState>>) {
             }
 
             was_running = true;
-        }
-        // Process just stopped
-        else if !is_running && was_running {
+        } else if !is_running && was_running {
             {
                 let mut state = state.lock().unwrap();
                 state.status = "Process closed. Re-enabling monitors...".to_string();
             }
 
-            // Restore all monitors that we have saved settings for.
-            // This is done in a single batch to avoid partial restore failures.
             let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
             let restored_count = {
                 let manager = monitor_manager.lock().unwrap();
