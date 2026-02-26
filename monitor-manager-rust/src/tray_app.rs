@@ -65,7 +65,7 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                         let state = state.lock().unwrap();
                         state.monitor_manager.clone()
                     };
-                    let manager = monitor_manager.lock().unwrap();
+                    let mut manager = monitor_manager.lock().unwrap();
                     let restored = manager.restore_all_monitors();
 
                     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -91,7 +91,7 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                         state.monitor_manager.clone()
                     };
                     {
-                        let manager = monitor_manager.lock().unwrap();
+                        let mut manager = monitor_manager.lock().unwrap();
                         let _ = manager.restore_all_monitors();
                     }
                     tray_icon.take();

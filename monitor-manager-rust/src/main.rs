@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use sysinfo::System;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -74,9 +74,7 @@ impl AppState {
 }
 
 fn main() {
-    let mut monitor_manager = MonitorManager::new();
-    monitor_manager.save_current_settings();
-
+    let monitor_manager = MonitorManager::new();
     let app_state = Arc::new(Mutex::new(AppState::new(monitor_manager)));
 
     let state_clone = Arc::clone(&app_state);
@@ -89,93 +87,83 @@ fn main() {
     monitor_thread.join().unwrap();
 }
 
+fn is_target_running(system: &System, target_exe: &str) -> bool {
+    let target_lower = target_exe.to_lowercase();
+    let target_filename = Path::new(target_exe)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_lowercase());
+
+    system.processes().values().any(|process| {
+        if let Some(exe_path) = process.exe() {
+            if exe_path.to_string_lossy().to_lowercase() == target_lower {
+                return true;
+            }
+            if let Some(ref target_fn) = target_filename {
+                if let Some(proc_fn) = exe_path.file_name() {
+                    return proc_fn.to_string_lossy().to_lowercase() == *target_fn;
+                }
+            }
+        } else if let Some(ref target_fn) = target_filename {
+            return process.name().to_string_lossy().to_lowercase() == *target_fn;
+        }
+        false
+    })
+}
+
 fn monitor_loop(state: Arc<Mutex<AppState>>) {
     let mut system = System::new_all();
     let mut was_running = false;
 
     loop {
-        if state.lock().unwrap().shutdown.load(Ordering::Relaxed) {
+        let shutdown = { state.lock().unwrap().shutdown.load(Ordering::Relaxed) };
+        if shutdown {
             let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
-            let _ = monitor_manager.lock().unwrap().restore_all_monitors();
+            let mut manager = monitor_manager.lock().unwrap();
+            if manager.are_monitors_disabled() {
+                let _ = manager.restore_all_monitors();
+            }
             break;
         }
 
         system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-        let target_exe = {
-            let state = state.lock().unwrap();
-            state.config.target_exe.clone()
-        };
-
-        let is_running = system.processes().values().any(|process| {
-            if let Some(exe_path) = process.exe() {
-                exe_path.to_string_lossy().to_lowercase() == target_exe.to_lowercase()
-            } else {
-                false
-            }
-        });
+        let target_exe = { state.lock().unwrap().config.target_exe.clone() };
+        let is_running = is_target_running(&system, &target_exe);
 
         if is_running && !was_running {
-            {
-                let mut state = state.lock().unwrap();
-                state.status = "Process detected! Disabling secondary monitors...".to_string();
-            }
-
-            // Never lock `state` while holding the monitor_manager lock — deadlock risk.
             let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
-
             let disabled_count = {
                 let mut manager = monitor_manager.lock().unwrap();
                 manager.save_current_settings();
-
-                let to_disable = manager
-                    .get_all_monitors()
-                    .into_iter()
-                    .filter(|m| !m.is_primary && m.is_active)
-                    .map(|m| m.device_name)
-                    .collect::<Vec<_>>();
-
-                let mut count = 0usize;
-                for device_name in &to_disable {
-                    if manager.disable_monitor(device_name) {
-                        count += 1;
-                    }
-                }
-
-                count
+                manager.disable_secondary_monitors()
             };
 
             {
                 let mut state = state.lock().unwrap();
-                if disabled_count > 0 {
-                    state.status = format!("Monitoring active - disabled {} monitor(s)", disabled_count);
-                } else {
-                    state.status = "Monitoring active - no secondary monitors to disable".to_string();
-                }
                 state.monitoring = true;
+                state.status = if disabled_count > 0 {
+                    format!("Active - disabled {} monitor(s)", disabled_count)
+                } else {
+                    "Active - no secondary monitors to disable".to_string()
+                };
             }
 
             was_running = true;
         } else if !is_running && was_running {
-            {
-                let mut state = state.lock().unwrap();
-                state.status = "Process closed. Re-enabling monitors...".to_string();
-            }
-
             let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
             let restored_count = {
-                let manager = monitor_manager.lock().unwrap();
+                let mut manager = monitor_manager.lock().unwrap();
                 manager.restore_all_monitors().len()
             };
 
             {
                 let mut state = state.lock().unwrap();
-                if restored_count > 0 {
-                    state.status = format!("Idle - restored {} monitor(s)", restored_count);
-                } else {
-                    state.status = "Idle - no monitors needed restoration".to_string();
-                }
                 state.monitoring = false;
+                state.status = if restored_count > 0 {
+                    format!("Idle - restored {} monitor(s)", restored_count)
+                } else {
+                    "Idle - no monitors needed restoration".to_string()
+                };
             }
 
             was_running = false;
