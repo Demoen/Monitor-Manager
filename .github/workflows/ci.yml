@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows quality and build
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
+
+      - name: Verify formatting
+        shell: pwsh
+        run: cargo +1.95.0 fmt --manifest-path monitor-manager-rust/Cargo.toml --all -- --check
+
+      - name: Run Clippy
+        shell: pwsh
+        run: cargo +1.95.0 clippy --manifest-path monitor-manager-rust/Cargo.toml --all-targets --all-features --locked -- -D warnings
+
+      - name: Run tests
+        shell: pwsh
+        run: cargo +1.95.0 test --manifest-path monitor-manager-rust/Cargo.toml --all-targets --all-features --locked
+
+      - name: Build release executable
+        shell: pwsh
+        run: cargo +1.95.0 build --manifest-path monitor-manager-rust/Cargo.toml --release --locked
+
+  dependencies:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit RustSec advisories
+        run: cargo audit --file monitor-manager-rust/Cargo.lock
+
+      - name: Check dependency licenses and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: monitor-manager-rust/Cargo.toml
+          rust-version: "1.95.0"
+          arguments: --all-features --locked

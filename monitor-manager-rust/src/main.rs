@@ -1,174 +1,198 @@
 #![windows_subsystem = "windows"]
 
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::error::Error;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
-use std::path::{Path, PathBuf};
-use sysinfo::System;
-use serde::{Deserialize, Serialize};
-use std::fs;
 
-mod monitor;
-mod tray_app;
+use native_windows_gui as nwg;
+use windows::core::HSTRING;
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-use monitor::MonitorManager;
+pub mod app_paths;
+pub mod config;
+pub mod controller;
+pub mod display;
+pub mod logging;
+pub mod process;
+pub mod single_instance;
+pub mod startup;
+pub mod tray_app;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
-    pub target_exe: String,
-}
+use app_paths::AppPaths;
+use config::{ConfigSource, ConfigStore, DisabledDisplay};
+use controller::{spawn_controller, ControllerRuntime, ControllerStartup};
+use display::{DisplayManager, TransitionStatus};
+use logging::{install_panic_hook, FileLogger};
+use single_instance::{activate_existing, activation_message, broadcast_activation, InstanceGuard};
+use tray_app::TrayApp;
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            target_exe: r"C:\Riot Games\League of Legends\Game\League of Legends.exe".to_string(),
-        }
-    }
-}
-
-impl Config {
-    pub fn load() -> Self {
-        let config_path = Self::config_path();
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            Self::default()
-        }
-    }
-
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let config_path = Self::config_path();
-        let content = serde_json::to_string_pretty(self)?;
-        fs::write(&config_path, content)?;
-        Ok(())
-    }
-
-    fn config_path() -> PathBuf {
-        let mut path = std::env::current_exe().unwrap_or_default();
-        path.pop();
-        path.push("config.json");
-        path
-    }
-}
-
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Config,
-    pub monitoring: bool,
-    pub status: String,
-    pub monitor_manager: Arc<Mutex<MonitorManager>>,
-    pub shutdown: Arc<AtomicBool>,
-}
-
-impl AppState {
-    pub fn new(monitor_manager: MonitorManager) -> Self {
-        Self {
-            config: Config::load(),
-            monitoring: false,
-            status: "Idle - waiting for process".to_string(),
-            monitor_manager: Arc::new(Mutex::new(monitor_manager)),
-            shutdown: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
+const MAX_LOG_BYTES: u64 = 1_048_576;
+const LOG_BACKUPS: usize = 3;
 
 fn main() {
-    let monitor_manager = MonitorManager::new();
-    let app_state = Arc::new(Mutex::new(AppState::new(monitor_manager)));
-
-    let state_clone = Arc::clone(&app_state);
-    let monitor_thread = thread::spawn(move || {
-        monitor_loop(state_clone);
-    });
-
-    tray_app::run(app_state);
-
-    monitor_thread.join().unwrap();
+    if let Err(error) = run() {
+        show_fatal_error(&error.to_string());
+    }
 }
 
-fn is_target_running(system: &System, target_exe: &str) -> bool {
-    let target_lower = target_exe.to_lowercase();
-    let target_filename = Path::new(target_exe)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_lowercase());
+fn run() -> Result<(), Box<dyn Error>> {
+    let background = std::env::args_os().skip(1).any(|arg| arg == "--background");
+    let executable = std::env::current_exe()?;
+    let paths = AppPaths::resolve()?;
+    paths.ensure_root()?;
 
-    system.processes().values().any(|process| {
-        if let Some(exe_path) = process.exe() {
-            if exe_path.to_string_lossy().to_lowercase() == target_lower {
-                return true;
-            }
-            if let Some(ref target_fn) = target_filename {
-                if let Some(proc_fn) = exe_path.file_name() {
-                    return proc_fn.to_string_lossy().to_lowercase() == *target_fn;
-                }
-            }
-        } else if let Some(ref target_fn) = target_filename {
-            return process.name().to_string_lossy().to_lowercase() == *target_fn;
+    let Some(_instance) = InstanceGuard::try_acquire(&paths.lock)? else {
+        if !background && !activate_existing(Duration::from_secs(5))? {
+            broadcast_activation()?;
         }
-        false
-    })
+        return Ok(());
+    };
+
+    let mut display = DisplayManager::native(paths.recovery.clone());
+    let (initial_recovery_message, initial_recovery_error) = match display.recover() {
+        Ok(outcome) if outcome.status == TransitionStatus::Recovered => (
+            Some(format!(
+                "Recovered {} display path(s) from the previous run.",
+                outcome.affected_display_ids.len()
+            )),
+            None,
+        ),
+        Ok(outcome) if outcome.status == TransitionStatus::AlreadyRestored => (
+            Some("The previous display topology was already restored.".to_owned()),
+            None,
+        ),
+        Ok(_) => (None, None),
+        Err(error) => (None, Some(format!("Startup recovery failed: {error}"))),
+    };
+
+    let (logger, log_warning) = match FileLogger::open(&paths.log, MAX_LOG_BYTES, LOG_BACKUPS) {
+        Ok(logger) => (Arc::new(logger), None),
+        Err(error) => (
+            Arc::new(FileLogger::disabled(paths.log.clone())),
+            Some(format!("Logging is unavailable: {error}")),
+        ),
+    };
+    install_panic_hook(logger.clone());
+    logger.info(format!(
+        "Monitor Manager {} starting{}",
+        env!("CARGO_PKG_VERSION"),
+        if background { " in background" } else { "" }
+    ))?;
+    if let Some(error) = &initial_recovery_error {
+        logger.warn(error)?;
+    }
+
+    let initial_displays = match display.list_displays() {
+        Ok(displays) => displays,
+        Err(error) => {
+            logger.warn(format!("initial display discovery failed: {error}"))?;
+            Vec::new()
+        }
+    };
+    let secondary_displays = initial_displays
+        .iter()
+        .filter(|display| display.is_active && !display.is_protected)
+        .map(|display| DisabledDisplay {
+            device_path: display.device_path.clone(),
+            last_known_name: display.friendly_name.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let config_store = ConfigStore::new(
+        paths.config.clone(),
+        AppPaths::legacy_config_path(&executable),
+    );
+    let loaded = config_store.load(&secondary_displays)?;
+    let mut warnings = loaded
+        .warnings
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let logging_unavailable = log_warning.is_some();
+    warnings.extend(log_warning);
+    match &loaded.source {
+        ConfigSource::MigratedLegacy => warnings.push(
+            "Legacy settings were imported with automation paused; review and save them."
+                .to_owned(),
+        ),
+        ConfigSource::RecoveredCorrupt(path) => warnings.push(format!(
+            "The invalid configuration was preserved at {}.",
+            path.display()
+        )),
+        ConfigSource::Current | ConfigSource::FirstRun => {}
+    }
+    let show_settings = !background
+        || loaded.source != ConfigSource::Current
+        || loaded.config.validate().is_err()
+        || logging_unavailable;
+    let review_required = loaded.source == ConfigSource::MigratedLegacy;
+
+    let _com = ComApartment::initialize()?;
+    nwg::init()?;
+    nwg::Font::set_global_family("Segoe UI")?;
+
+    let (command_tx, command_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let failsafe_tx = command_tx.clone();
+    let app = TrayApp::build(
+        command_tx,
+        event_rx,
+        paths.root.clone(),
+        activation_message(),
+    )?;
+    let notice = app.notice_sender();
+    let runtime = ControllerRuntime::native(
+        display,
+        config_store,
+        executable,
+        logger.clone(),
+        ControllerStartup {
+            config: loaded.config,
+            warnings,
+            review_required,
+            recovery_message: initial_recovery_message,
+        },
+    );
+    let controller = spawn_controller(runtime, command_rx, event_tx, move || notice.notice())?;
+
+    let dispatch_result = catch_unwind(AssertUnwindSafe(|| app.run(show_settings)));
+    if dispatch_result.is_err() {
+        let _ = failsafe_tx.send(controller::ControllerCommand::Shutdown { force: false });
+    }
+    drop(app);
+    drop(failsafe_tx);
+    let controller_result = controller
+        .join()
+        .map_err(|_| "controller thread terminated unexpectedly")?;
+    controller_result.map_err(|error| -> Box<dyn Error> { error.into() })?;
+    if dispatch_result.is_err() {
+        return Err("the Windows UI terminated unexpectedly".into());
+    }
+    logger.info("Monitor Manager stopped")?;
+    Ok(())
 }
 
-fn monitor_loop(state: Arc<Mutex<AppState>>) {
-    let mut system = System::new_all();
-    let mut was_running = false;
+struct ComApartment;
 
-    loop {
-        let shutdown = { state.lock().unwrap().shutdown.load(Ordering::Relaxed) };
-        if shutdown {
-            let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
-            let mut manager = monitor_manager.lock().unwrap();
-            if manager.are_monitors_disabled() {
-                let _ = manager.restore_all_monitors();
-            }
-            break;
-        }
+impl ComApartment {
+    fn initialize() -> windows::core::Result<Self> {
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
+        Ok(Self)
+    }
+}
 
-        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
 
-        let target_exe = { state.lock().unwrap().config.target_exe.clone() };
-        let is_running = is_target_running(&system, &target_exe);
-
-        if is_running && !was_running {
-            let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
-            let disabled_count = {
-                let mut manager = monitor_manager.lock().unwrap();
-                manager.save_current_settings();
-                manager.disable_secondary_monitors()
-            };
-
-            {
-                let mut state = state.lock().unwrap();
-                state.monitoring = true;
-                state.status = if disabled_count > 0 {
-                    format!("Active - disabled {} monitor(s)", disabled_count)
-                } else {
-                    "Active - no secondary monitors to disable".to_string()
-                };
-            }
-
-            was_running = true;
-        } else if !is_running && was_running {
-            let monitor_manager = { state.lock().unwrap().monitor_manager.clone() };
-            let restored_count = {
-                let mut manager = monitor_manager.lock().unwrap();
-                manager.restore_all_monitors().len()
-            };
-
-            {
-                let mut state = state.lock().unwrap();
-                state.monitoring = false;
-                state.status = if restored_count > 0 {
-                    format!("Idle - restored {} monitor(s)", restored_count)
-                } else {
-                    "Idle - no monitors needed restoration".to_string()
-                };
-            }
-
-            was_running = false;
-        }
-
-        thread::sleep(Duration::from_secs(2));
+fn show_fatal_error(message: &str) {
+    let caption = HSTRING::from("Monitor Manager");
+    let text = HSTRING::from(format!("Monitor Manager could not start.\n\n{message}"));
+    unsafe {
+        MessageBoxW(None, &text, &caption, MB_OK | MB_ICONERROR);
     }
 }
