@@ -50,4 +50,4 @@ strip = true
 panic = "unwind"
 
 [build-dependencies]
-embed-resource = "2.4"
+embed-resource = "3.0"
